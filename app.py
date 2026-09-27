@@ -1,27 +1,12 @@
 # -*- coding: utf-8 -*-
-"""
-app.py —— 错题卡片生成器（Streamlit 主程序）
-
-整体流程：
-  ① 打开网页 → 先看到「API Key 验证页」，验证通过才能进入工具
-  ② 上传试卷图片 → 旋转 / 裁切出本题区域
-  ③ 调用 glm-4.1v-thinking-flash 识别印刷体原题（忽略手写）
-  ④ 题干可在文本框里手动修正
-  ⑤ 调用 glm-4-flash 生成「AI 解析 + 3 道变式题 + 变式解析」
-  ⑥ 自动复核：把题干 + 解析再提交一次，验算计算/逻辑/公式
-  ⑦ 上传手写解题图 → 预览卡片 / 导出固定模板 PDF
-
-安全说明：
-  · API Key 仅保存在 st.session_state（浏览器会话内存），不写文件、不入库、不外传；
-  · 刷新或关闭页面即丢失，需要重新输入；
-  · 上传的图片只存在于内存，程序退出即清理，不做任何持久化。
-"""
+""" app.py —— 错题卡片生成器（Streamlit 主程序） 整体流程： ① 打开网页 → 先看到「API Key 验证页」，验证通过才能进入工具 ② 上传试卷图片 → 旋转 / 裁切出本题区域 ③ 调用 glm-4.1v-thinking-flash 识别印刷体原题（忽略手写） ④ 题干可在文本框里手动修正 ⑤ 调用 glm-4-flash 生成「AI 解析 + 3 道变式题 + 变式解析」 ⑥ 自动复核：把题干 + 解析再提交一次，验算计算/逻辑/公式 ⑦ 上传手写解题图 → 预览卡片 / 导出固定模板 PDF 安全说明： · API Key 仅保存在 st.session_state（浏览器会话内存），不写文件、不入库、不外传； · 刷新或关闭页面即丢失，需要重新输入； · 上传的图片只存在于内存，程序退出即清理，不做任何持久化。 """
 
 from __future__ import annotations
 
 import io
 import sys
 import os
+import base64
 from typing import Optional
 
 import streamlit as st
@@ -52,14 +37,7 @@ st.set_page_config(
 
 # 极简样式：只做基础留白与字号控制，不做花哨装饰
 st.markdown(
-    """
-    <style>
-      .block-container { padding-top: 2rem; padding-bottom: 3rem; max-width: 860px; }
-      .small-tip { color: #8a8a8a; font-size: 13px; line-height: 1.6; }
-      .section-title { font-size: 16px; font-weight: 600; margin: 18px 0 8px; }
-      hr { margin: 1.2rem 0; }
-    </style>
-    """,
+    """ <style> .block-container { padding-top: 2rem; padding-bottom: 3rem; max-width: 860px; } .small-tip { color: #8a8a8a; font-size: 13px; line-height: 1.6; } .section-title { font-size: 16px; font-weight: 600; margin: 18px 0 8px; } hr { margin: 1.2rem 0; } </style> """,
     unsafe_allow_html=True,
 )
 
@@ -169,13 +147,52 @@ def page_auth() -> None:
 # 二、图片处理工具（旋转 + 裁切，纯 PIL，不依赖额外组件）
 # ===========================================================================
 
-def rotate_and_crop(img: Image.Image, rot: int,
-                    top: int, bottom: int, left: int, right: int) -> Image.Image:
-    """
-    对图片做旋转 + 四边百分比裁切。
-    :param rot:    旋转角度（逆时针为正），PIL 的 rotate 默认逆时针
-    :param top/bottom/left/right: 四边裁掉的百分比（0~49）
-    """
+def _preprocess_for_vl(img: Image.Image, max_side: int = 1600) -> str:
+    """ 压缩图片并转 base64，避免手机拍照过大导致 API 失败。 返回 JPEG 格式的 base64 字符串。 """
+    im = img.convert("RGB")
+    w, h = im.size
+    longest = max(w, h)
+    if longest > max_side:
+        ratio = max_side / longest
+        im = im.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _recognize_question_vl(img: Image.Image, api_key: str) -> str:
+    """ 直接调用智谱多模态（glm-4v-flash）识别印刷体题干，忽略手写。 不依赖 zhipu_client.py 里的实现，确保模型和提示词正确。 """
+    from zhipuai import ZhipuAI
+    client = ZhipuAI(api_key=api_key)
+    img_b64 = _preprocess_for_vl(img)
+    resp = client.chat.completions.create(
+        model="glm-4v-flash",
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "你是OCR识别助手，只提取图片里面印刷的数学原题题干。\n"
+                        "规则：\n"
+                        "1. 忽略所有手写字迹、草稿、手写答案、划线标记；\n"
+                        "2. 保留原题的数字、公式、几何文字条件；\n"
+                        "3. 不要解释题目，不要作答，只输出提取出来的纯题干文本；\n"
+                        "4. 如果图片没有印刷题目，直接返回空字符串。"
+                    ),
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+                },
+            ],
+        }],
+    )
+    return resp.choices[0].message.content.strip()
+
+
+def rotate_and_crop(img: Image.Image, rot: int, top: int, bottom: int, left: int, right: int) -> Image.Image:
+    """ 对图片做旋转 + 四边百分比裁切。 :param rot: 旋转角度（逆时针为正），PIL 的 rotate 默认逆时针 :param top/bottom/left/right: 四边裁掉的百分比（0~49） """
     im = img.convert("RGB")
     if rot:
         im = im.rotate(rot, expand=True)          # expand=True 避免旋转后被裁掉边角
@@ -195,10 +212,7 @@ def rotate_and_crop(img: Image.Image, rot: int,
 
 
 def image_editor(img: Image.Image, prefix: str, label: str) -> Image.Image:
-    """
-    渲染一个「旋转 + 裁切」编辑区，返回处理后的图片。
-    用滑块实现裁切，避免额外安装 streamlit 裁切组件，兼容性最好。
-    """
+    """ 渲染一个「旋转 + 裁切」编辑区，返回处理后的图片。 用滑块实现裁切，避免额外安装 streamlit 裁切组件，兼容性最好。 """
     st.caption(label)
 
     # --- 旋转 ---
@@ -233,10 +247,7 @@ def image_editor(img: Image.Image, prefix: str, label: str) -> Image.Image:
 # ===========================================================================
 
 def show_md(title: str, text: str, key: str, default_md: bool = True) -> None:
-    """
-    展示一段 AI 生成的 Markdown 文本。
-    提供「纯文本模式」开关，防止个别 LaTeX 语法导致渲染异常。
-    """
+    """ 展示一段 AI 生成的 Markdown 文本。 提供「纯文本模式」开关，防止个别 LaTeX 语法导致渲染异常。 """
     if not text:
         st.info("暂无内容")
         return
@@ -305,7 +316,8 @@ def page_main() -> None:
     if recog and cropped_img is not None:
         with st.spinner("正在识别题目，请稍候…"):
             try:
-                st.session_state.question_text = client.recognize_question(cropped_img)
+                st.session_state.question_text = _recognize_question_vl(
+                    cropped_img, st.session_state.api_key)
             except Exception as exc:  # noqa: BLE001
                 st.error(f"识别失败：{exc}")
 
