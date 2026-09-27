@@ -162,8 +162,11 @@ def _preprocess_for_vl(img: Image.Image, max_side: int = 1600) -> str:
 
 def _recognize_question_vl(img: Image.Image, api_key: str) -> str:
     """ 直接调用智谱多模态（glm-4v-flash）识别印刷体题干，忽略手写。 不依赖 zhipu_client.py 里的实现，确保模型和提示词正确。 """
-    from zhipuai import ZhipuAI
-    client = ZhipuAI(api_key=api_key)
+    from openai import OpenAI
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://open.bigmodel.cn/api/paas/v4/"
+    )
     img_b64 = _preprocess_for_vl(img)
     resp = client.chat.completions.create(
         model="glm-4v-flash",
