@@ -161,7 +161,7 @@ def _preprocess_for_vl(img: Image.Image, max_side: int = 1600) -> str:
 
 
 def _recognize_question_vl(img: Image.Image, api_key: str) -> str:
-    """ 直接调用智谱多模态（glm-4v-flash）识别印刷体题干，忽略手写。 不依赖 zhipu_client.py 里的实现，确保模型和提示词正确。 """
+    """ 直接调用智谱多模态（glm-4.6v-flash）识别印刷体题干，忽略手写。 不依赖 zhipu_client.py 里的实现，确保模型和提示词正确。 """
     from openai import OpenAI
     client = OpenAI(
         api_key=api_key,
@@ -169,7 +169,7 @@ def _recognize_question_vl(img: Image.Image, api_key: str) -> str:
     )
     img_b64 = _preprocess_for_vl(img)
     resp = client.chat.completions.create(
-        model="glm-4v-flash",
+        model="glm-4.6v-flash",
         messages=[{
             "role": "user",
             "content": [
@@ -186,7 +186,7 @@ def _recognize_question_vl(img: Image.Image, api_key: str) -> str:
                 },
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+                    "image_url": {"url": img_b64},
                 },
             ],
         }],
@@ -319,8 +319,24 @@ def page_main() -> None:
     if recog and cropped_img is not None:
         with st.spinner("正在识别题目，请稍候…"):
             try:
-                st.session_state.question_text = _recognize_question_vl(
-                    cropped_img, st.session_state.api_key)
+                result = _recognize_question_vl(cropped_img, st.session_state.api_key)
+                st.session_state.question_text = result
+                # 调试：如果识别结果为空，直接显示API原始返回
+                if not result.strip():
+                    st.warning("识别返回了空内容，下面是API的原始返回，截图发给我：")
+                    from openai import OpenAI as _OAI
+                    _dbg = _OAI(api_key=st.session_state.api_key,
+                                base_url="https://open.bigmodel.cn/api/paas/v4/")
+                    _b64 = _preprocess_for_vl(cropped_img)
+                    _r = _dbg.chat.completions.create(
+                        model="glm-4.6v-flash",
+                        messages=[{"role": "user", "content": [
+                            {"type": "text", "text": "请把这张图片里所有文字原样读出来"},
+                            {"type": "image_url",
+                             "image_url": {"url": _b64}},
+                        ]}],
+                    )
+                    st.code(_r.choices[0].message.content)
             except Exception as exc:  # noqa: BLE001
                 st.error(f"识别失败：{exc}")
 
